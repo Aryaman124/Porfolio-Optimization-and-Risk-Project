@@ -1,0 +1,11 @@
+pandas 
+numpy #-> data and math reasoning
+matplotlib #-> functioning with charts 
+yfinance #-> download and fetch all the stock data
+cvxpy
+scipy #-> optimizational math
+PyPortfolioOpt #-> ready made portfolio of optimization methods
+pydantic # ->clean configurations
+google-genai #-> Use for Googles ADK
+python-dotenv #-> allows to let us read .env files for API keys
+
