@@ -28,5 +28,5 @@ if __name__ == "__main__":
     main()
 
 
-    # test run seeing if the gemini model is working
+    # test run seeing if the gemini model is working now
     
