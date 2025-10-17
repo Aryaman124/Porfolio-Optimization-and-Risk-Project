@@ -9,3 +9,4 @@ pydantic # ->clean configurations
 google-genai #-> Use for Googles ADK
 python-dotenv #-> allows to let us read .env files for API keys
 
+pip install streamlit plotly seaborn
