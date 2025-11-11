@@ -49,9 +49,41 @@ NASDAQ_COMMON = {
 
 # Always show these indices first on the tape
 FIXED_TAPE = [
+    # 📊 Major Indices
     {"proName": "FOREXCOM:SPXUSD", "title": "S&P 500"},
-    {"proName": "NASDAQ:NDX",       "title": "NASDAQ 100"},
-    {"proName": "FOREXCOM:DJI",     "title": "Dow Jones"},
+    {"proName": "NASDAQ:NDX", "title": "NASDAQ 100"},
+    {"proName": "FOREXCOM:DJI", "title": "Dow Jones"},
+    {"proName": "FOREXCOM:US30", "title": "US 30"},
+    {"proName": "FOREXCOM:VIX", "title": "VIX (Volatility Index)"},
+
+    # 💵 Currencies
+    {"proName": "FX_IDC:EURUSD", "title": "EUR/USD"},
+    {"proName": "FX_IDC:USDJPY", "title": "USD/JPY"},
+
+    # 🪙 Commodities
+    {"proName": "COMEX:GC1!", "title": "Gold"},
+    {"proName": "NYMEX:CL1!", "title": "Crude Oil"},
+    {"proName": "TVC:SILVER", "title": "Silver"},
+    {"proName": "NYMEX:NG1!", "title": "Natural Gas"},
+
+    # 🏦 Top Tech & Growth Stocks
+    {"proName": "NASDAQ:AAPL", "title": "Apple"},
+    {"proName": "NASDAQ:MSFT", "title": "Microsoft"},
+    {"proName": "NASDAQ:NVDA", "title": "NVIDIA"},
+    {"proName": "NASDAQ:META", "title": "Meta"},
+    {"proName": "NASDAQ:AMZN", "title": "Amazon"},
+    {"proName": "NASDAQ:GOOGL", "title": "Google"},
+    {"proName": "NASDAQ:TSLA", "title": "Tesla"},
+
+    # 🏦 Financials & Industrials
+    {"proName": "NYSE:JPM", "title": "JPMorgan"},
+    {"proName": "NYSE:GS", "title": "Goldman Sachs"},
+    {"proName": "NYSE:BRK.B", "title": "Berkshire Hathaway"},
+    {"proName": "NYSE:V", "title": "Visa"},
+
+    # 💡 Optional crypto for fun
+    {"proName": "BITSTAMP:BTCUSD", "title": "Bitcoin"},
+    {"proName": "BITSTAMP:ETHUSD", "title": "Ethereum"},
 ]
 
 def _tv_symbol(t: str) -> str:
@@ -59,28 +91,9 @@ def _tv_symbol(t: str) -> str:
     exch = "NASDAQ" if t in NASDAQ_COMMON else "NYSE"
     return f"{exch}:{t}"
 
-def render_ticker_tape(tickers: list[str], height: int = 52, dark: bool = True):
-    # Map user tickers to TradingView proNames
-    user_syms = [{"proName": _tv_symbol(t), "title": t.upper()} for t in tickers]
-
-    # Prepend fixed indices and de-duplicate by proName (keep order)
-    symbols = FIXED_TAPE + user_syms
-    seen = set()
-    dedup = []
-    for s in symbols:
-        if s["proName"] not in seen:
-            dedup.append(s)
-            seen.add(s["proName"])
-
-    # Limit to ~12 items for a clean tape
-    dedup = dedup[:12]
-
-    # Fallback
-    if not dedup:
-        dedup = [{"proName": "FOREXCOM:SPXUSD", "title": "S&P 500"}]
-
+def render_fixed_ticker_tape(height: int = 52, dark: bool = True):
     config = {
-        "symbols": dedup,
+        "symbols": FIXED_TAPE,
         "showSymbolLogo": True,
         "colorTheme": "dark" if dark else "light",
         "isTransparent": True,
@@ -150,12 +163,8 @@ if objective == "black_litterman":
 # ============================= Header / Tape =============================
 
 st.markdown("### 📈 PortfolioQuant.ai")
-
-if "rendered_tape" not in st.session_state:
-    render_ticker_tape([], height=52, dark=True)
-    st.session_state["rendered_tape"] = True
-else:
-    st.empty()  # no need to re-render every run
+render_fixed_ticker_tape(height=52, dark=True)
+st.divider()
 
 # ============================= Tabs =============================
 
