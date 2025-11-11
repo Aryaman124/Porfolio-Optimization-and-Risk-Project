@@ -150,10 +150,12 @@ if objective == "black_litterman":
 # ============================= Header / Tape =============================
 
 st.markdown("### 📈 PortfolioQuant.ai")
-show = st.session_state.get("tickers", default_focus) or default_focus
-render_ticker_tape(show, height=52, dark=True)  # TradingView handles live updates
 
-st.divider()
+if "rendered_tape" not in st.session_state:
+    render_ticker_tape([], height=52, dark=True)
+    st.session_state["rendered_tape"] = True
+else:
+    st.empty()  # no need to re-render every run
 
 # ============================= Tabs =============================
 
