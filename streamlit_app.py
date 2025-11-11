@@ -46,24 +46,46 @@ def parse_kv(text: str) -> dict[str, float]:
 NASDAQ_COMMON = {
     "AAPL","MSFT","NVDA","AMZN","GOOGL","GOOG","META","TSLA","NFLX","AVGO","ADBE","INTC","CSCO","PEP","COST","AMD","QCOM","MU"
 }
+
+# Always show these indices first on the tape
+FIXED_TAPE = [
+    {"proName": "FOREXCOM:SPXUSD", "title": "S&P 500"},
+    {"proName": "NASDAQ:NDX",       "title": "NASDAQ 100"},
+    {"proName": "FOREXCOM:DJI",     "title": "Dow Jones"},
+]
+
 def _tv_symbol(t: str) -> str:
     t = t.upper().strip().replace("-", ".")  # BRK-B -> BRK.B
     exch = "NASDAQ" if t in NASDAQ_COMMON else "NYSE"
     return f"{exch}:{t}"
 
 def render_ticker_tape(tickers: list[str], height: int = 52, dark: bool = True):
-    symbols = [{"proName": _tv_symbol(t), "title": t} for t in tickers[:12]]  # show up to ~12
-    if not symbols:
-        symbols = [{"proName":"NASDAQ:AAPL","title":"AAPL"},
-                   {"proName":"NASDAQ:MSFT","title":"MSFT"},
-                   {"proName":"NASDAQ:NVDA","title":"NVDA"}]
+    # Map user tickers to TradingView proNames
+    user_syms = [{"proName": _tv_symbol(t), "title": t.upper()} for t in tickers]
+
+    # Prepend fixed indices and de-duplicate by proName (keep order)
+    symbols = FIXED_TAPE + user_syms
+    seen = set()
+    dedup = []
+    for s in symbols:
+        if s["proName"] not in seen:
+            dedup.append(s)
+            seen.add(s["proName"])
+
+    # Limit to ~12 items for a clean tape
+    dedup = dedup[:12]
+
+    # Fallback
+    if not dedup:
+        dedup = [{"proName": "FOREXCOM:SPXUSD", "title": "S&P 500"}]
+
     config = {
-        "symbols": symbols,
+        "symbols": dedup,
         "showSymbolLogo": True,
         "colorTheme": "dark" if dark else "light",
         "isTransparent": True,
         "displayMode": "adaptive",
-        "locale": "en"
+        "locale": "en",
     }
     html = f"""
     <div class="tradingview-widget-container" style="width:100%;">
@@ -75,6 +97,7 @@ def render_ticker_tape(tickers: list[str], height: int = 52, dark: bool = True):
     </div>
     """
     st.components.v1.html(html, height=height, scrolling=False)
+
 
 # ============================= Sidebar =============================
 
