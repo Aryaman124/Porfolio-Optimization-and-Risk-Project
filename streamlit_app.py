@@ -42,31 +42,27 @@ def parse_kv(text: str) -> dict[str, float]:
     return out
 
 # -------- TradingView ticker tape (nice animated market strip) --------
-# TradingView wants "EXCHANGE:SYMBOL" (e.g., NASDAQ:AAPL). We'll do a simple guess.
 NASDAQ_COMMON = {
     "AAPL","MSFT","NVDA","AMZN","GOOGL","GOOG","META","TSLA","NFLX","AVGO","ADBE","INTC","CSCO","PEP","COST","AMD","QCOM","MU"
 }
 
-# Always show these indices first on the tape
+# Fixed symbols for the live market bar (independent of user selections)
 FIXED_TAPE = [
-    # 📊 Major Indices
+    # Indices
     {"proName": "FOREXCOM:SPXUSD", "title": "S&P 500"},
     {"proName": "NASDAQ:NDX", "title": "NASDAQ 100"},
     {"proName": "FOREXCOM:DJI", "title": "Dow Jones"},
     {"proName": "FOREXCOM:US30", "title": "US 30"},
-    {"proName": "FOREXCOM:VIX", "title": "VIX (Volatility Index)"},
-
-    # 💵 Currencies
+    {"proName": "FOREXCOM:VIX", "title": "VIX"},
+    # FX
     {"proName": "FX_IDC:EURUSD", "title": "EUR/USD"},
     {"proName": "FX_IDC:USDJPY", "title": "USD/JPY"},
-
-    # 🪙 Commodities
+    # Commodities
     {"proName": "COMEX:GC1!", "title": "Gold"},
     {"proName": "NYMEX:CL1!", "title": "Crude Oil"},
     {"proName": "TVC:SILVER", "title": "Silver"},
     {"proName": "NYMEX:NG1!", "title": "Natural Gas"},
-
-    # 🏦 Top Tech & Growth Stocks
+    # Megacaps
     {"proName": "NASDAQ:AAPL", "title": "Apple"},
     {"proName": "NASDAQ:MSFT", "title": "Microsoft"},
     {"proName": "NASDAQ:NVDA", "title": "NVIDIA"},
@@ -74,14 +70,12 @@ FIXED_TAPE = [
     {"proName": "NASDAQ:AMZN", "title": "Amazon"},
     {"proName": "NASDAQ:GOOGL", "title": "Google"},
     {"proName": "NASDAQ:TSLA", "title": "Tesla"},
-
-    # 🏦 Financials & Industrials
+    # Financials
     {"proName": "NYSE:JPM", "title": "JPMorgan"},
     {"proName": "NYSE:GS", "title": "Goldman Sachs"},
     {"proName": "NYSE:BRK.B", "title": "Berkshire Hathaway"},
     {"proName": "NYSE:V", "title": "Visa"},
-
-    # 💡 Optional crypto for fun
+    # Crypto (optional)
     {"proName": "BITSTAMP:BTCUSD", "title": "Bitcoin"},
     {"proName": "BITSTAMP:ETHUSD", "title": "Ethereum"},
 ]
@@ -111,7 +105,6 @@ def render_fixed_ticker_tape(height: int = 52, dark: bool = True):
     """
     st.components.v1.html(html, height=height, scrolling=False)
 
-
 # ============================= Sidebar =============================
 
 st.sidebar.title("⚙️ Settings")
@@ -126,6 +119,9 @@ if c1.button("Select All"):
 if c2.button("Clear"):
     selected = []
 st.session_state["tickers"] = selected
+
+# Single source of truth for selections used across the app
+selected_tickers = st.session_state.get("tickers", default_focus)
 
 col_dates = st.sidebar.columns(2)
 start = col_dates[0].text_input("Start (YYYY-MM-DD)", "2023-01-01")
@@ -175,10 +171,10 @@ with tab_data:
     st.header("📊 Market Data Preview")
     if st.button("Fetch Data", type="primary"):
         try:
-            if not show:
+            if not selected_tickers:
                 st.warning("Please select at least one ticker in the sidebar.")
             else:
-                cfg = DataConfig(tickers=show, start=start, end=(end or None))
+                cfg = DataConfig(tickers=selected_tickers, start=start, end=(end or None))
                 prices = fetch_prices(cfg)
                 st.success(f"Fetched {prices.shape[0]} rows × {prices.shape[1]} assets")
                 st.dataframe(prices.tail().round(2), use_container_width=True)
@@ -204,11 +200,11 @@ with tab_opt:
     run_it = st.button("Run Optimization", type="primary")
     if run_it:
         try:
-            if not show:
+            if not selected_tickers:
                 st.warning("Please select at least one ticker in the sidebar.")
             else:
                 opt_kwargs = dict(
-                    tickers=show,
+                    tickers=selected_tickers,
                     start=start,
                     end=(end or None),
                     objective=objective,
