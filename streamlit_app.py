@@ -58,10 +58,7 @@ FIXED_TAPE = [
     {"proName": "FX_IDC:EURUSD", "title": "EUR/USD"},
     {"proName": "FX_IDC:USDJPY", "title": "USD/JPY"},
     # Commodities
-    {"proName": "COMEX:GC1!", "title": "Gold"},
-    {"proName": "NYMEX:CL1!", "title": "Crude Oil"},
-    {"proName": "TVC:SILVER", "title": "Silver"},
-    {"proName": "NYMEX:NG1!", "title": "Natural Gas"},
+
     # Megacaps
     {"proName": "NASDAQ:AAPL", "title": "Apple"},
     {"proName": "NASDAQ:MSFT", "title": "Microsoft"},
