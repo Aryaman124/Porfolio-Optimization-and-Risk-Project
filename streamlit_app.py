@@ -7,9 +7,13 @@ import plotly.express as px
 import streamlit as st
 
 from src.agents.data_agent import (
-    DataConfig, fetch_prices, daily_and_monthly_returns, summary_stats
+    DataConfig,
+    fetch_prices,
+    daily_and_monthly_returns,
+    summary_stats,
 )
 from src.agents.optimizer_agent import OptConfig, run_optimization
+from src.data.ticker_names import TICKER_NAMES  # <-- your dictionary
 
 st.set_page_config(page_title="PortfolioQuant.ai", page_icon="📈", layout="wide")
 
@@ -17,36 +21,64 @@ st.set_page_config(page_title="PortfolioQuant.ai", page_icon="📈", layout="wid
 
 SYMBOLS_PATH = Path("data/symbols/sp500.csv")
 
+
 def load_universe() -> list[str]:
     """Load ticker universe from data/symbols/sp500.csv or fall back."""
     if SYMBOLS_PATH.exists():
-        tickers = [t.strip().upper() for t in SYMBOLS_PATH.read_text().splitlines() if t.strip()]
+        tickers = [
+            t.strip().upper()
+            for t in SYMBOLS_PATH.read_text().splitlines()
+            if t.strip()
+        ]
+        # de-duplicate and sort
         return sorted(list(dict.fromkeys(tickers)))
     # small fallback universe for first run
-    return ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","BRK-B","JPM","V","XOM","UNH","AVGO"]
+    return [
+        "AAPL",
+        "MSFT",
+        "NVDA",
+        "AMZN",
+        "GOOGL",
+        "META",
+        "TSLA",
+        "BRK-B",
+        "JPM",
+        "V",
+        "XOM",
+        "UNH",
+        "AVGO",
+    ]
+
 
 def weights_to_df(weights: dict) -> pd.DataFrame:
     df = pd.DataFrame(list(weights.items()), columns=["Asset", "Weight"])
     df["Weight %"] = (df["Weight"] * 100).round(2)
     return df.sort_values("Weight", ascending=False).reset_index(drop=True)
 
+
 def parse_kv(text: str) -> dict[str, float]:
-    out = {}
+    """Parse 'TICKER: value' text areas into a dict."""
+    out: dict[str, float] = {}
     for line in text.splitlines():
         if ":" in line:
             k, v = line.split(":", 1)
             try:
                 out[k.strip().upper()] = float(v.strip())
             except Exception:
+                # ignore bad lines
                 pass
     return out
 
-# -------- TradingView ticker tape (nice animated market strip) --------
-NASDAQ_COMMON = {
-    "AAPL","MSFT","NVDA","AMZN","GOOGL","GOOG","META","TSLA","NFLX","AVGO","ADBE","INTC","CSCO","PEP","COST","AMD","QCOM","MU"
-}
 
-# Fixed symbols for the live market bar (independent of user selections)
+def fmt_ticker(t: str) -> str:
+    """Show 'TICKER — Company Name' in the UI"""
+    name = TICKER_NAMES.get(t, "")
+    return f"{t} — {name}" if name else t
+
+
+# -------- TradingView ticker tape (nice animated market strip) --------
+
+# This bar is *completely independent* of what the user selects.
 FIXED_TAPE = [
     # Indices
     {"proName": "FOREXCOM:SPXUSD", "title": "S&P 500"},
@@ -58,7 +90,10 @@ FIXED_TAPE = [
     {"proName": "FX_IDC:EURUSD", "title": "EUR/USD"},
     {"proName": "FX_IDC:USDJPY", "title": "USD/JPY"},
     # Commodities
-
+    {"proName": "COMEX:GC1!", "title": "Gold"},
+    {"proName": "NYMEX:CL1!", "title": "Crude Oil"},
+    {"proName": "TVC:SILVER", "title": "Silver"},
+    {"proName": "NYMEX:NG1!", "title": "Natural Gas"},
     # Megacaps
     {"proName": "NASDAQ:AAPL", "title": "Apple"},
     {"proName": "NASDAQ:MSFT", "title": "Microsoft"},
@@ -72,15 +107,11 @@ FIXED_TAPE = [
     {"proName": "NYSE:GS", "title": "Goldman Sachs"},
     {"proName": "NYSE:BRK.B", "title": "Berkshire Hathaway"},
     {"proName": "NYSE:V", "title": "Visa"},
-    # Crypto (optional)
+    # Crypto
     {"proName": "BITSTAMP:BTCUSD", "title": "Bitcoin"},
     {"proName": "BITSTAMP:ETHUSD", "title": "Ethereum"},
 ]
 
-def _tv_symbol(t: str) -> str:
-    t = t.upper().strip().replace("-", ".")  # BRK-B -> BRK.B
-    exch = "NASDAQ" if t in NASDAQ_COMMON else "NYSE"
-    return f"{exch}:{t}"
 
 def render_fixed_ticker_tape(height: int = 52, dark: bool = True):
     config = {
@@ -102,23 +133,36 @@ def render_fixed_ticker_tape(height: int = 52, dark: bool = True):
     """
     st.components.v1.html(html, height=height, scrolling=False)
 
+
 # ============================= Sidebar =============================
 
 st.sidebar.title("⚙️ Settings")
 
 universe = load_universe()
-default_focus = [t for t in ["AAPL","MSFT","NVDA"] if t in universe] or universe[:3]
+default_focus = [t for t in ["AAPL", "MSFT", "NVDA"] if t in universe] or universe[:3]
 
-selected = st.sidebar.multiselect("Select tickers", options=universe, default=default_focus)
+# Initialize session state for selected tickers
+if "selected_tickers" not in st.session_state:
+    st.session_state["selected_tickers"] = default_focus
+
+# Multiselect with nice labels
+selected = st.sidebar.multiselect(
+    "Select tickers",
+    options=universe,
+    default=st.session_state["selected_tickers"],
+    format_func=fmt_ticker,
+    key="selected_tickers",
+)
+
+# Select all / clear buttons
 c1, c2 = st.sidebar.columns(2)
 if c1.button("Select All"):
-    selected = universe
+    st.session_state["selected_tickers"] = universe
 if c2.button("Clear"):
-    selected = []
-st.session_state["tickers"] = selected
+    st.session_state["selected_tickers"] = []
 
-# Single source of truth for selections used across the app
-selected_tickers = st.session_state.get("tickers", default_focus)
+# Final list used across app
+selected_tickers = st.session_state["selected_tickers"]
 
 col_dates = st.sidebar.columns(2)
 start = col_dates[0].text_input("Start (YYYY-MM-DD)", "2023-01-01")
@@ -133,22 +177,39 @@ max_weight = st.sidebar.slider("Max weight per asset", 0.05, 1.0, 0.40, 0.05)
 long_only = st.sidebar.toggle("Long only", value=True)
 risk_free_rate = st.sidebar.number_input(
     "Risk-free rate (annual, e.g. 0.015 = 1.5%)",
-    value=0.0010, step=0.0005, format="%.4f"
+    value=0.0010,
+    step=0.0005,
+    format="%.4f",
 )
 
 with st.sidebar.expander("💵 Capital (optional, for share counts)", expanded=False):
-    capital = st.number_input("Total portfolio capital ($)", value=0.0, min_value=0.0, step=100.0, format="%.2f")
+    capital = st.number_input(
+        "Total portfolio capital ($)",
+        value=0.0,
+        min_value=0.0,
+        step=100.0,
+        format="%.2f",
+    )
     capital = capital if capital > 0 else None
 
-bl_inputs = {}
+bl_inputs: dict = {}
 if objective == "black_litterman":
     with st.sidebar.expander("🧠 Black–Litterman Inputs", expanded=True):
-        st.caption("Provide market caps and absolute views (annual expected returns). Leave blank to fallback to historical.")
-        caps_str = st.text_area("Market Caps (ticker: cap, one per line)",
-                                "AAPL: 2900000000000\nMSFT: 3100000000000\nNVDA: 3000000000000")
-        views_str = st.text_area("Views (ticker: expected_return, one per line)",
-                                 "MSFT: 0.11\nAAPL: 0.08")
-        bl_tau = st.number_input("BL tau (blend strength)", value=0.05, step=0.01, format="%.2f")
+        st.caption(
+            "Provide market caps and absolute views (annual expected returns). "
+            "Leave blank to fallback to historical."
+        )
+        caps_str = st.text_area(
+            "Market Caps (ticker: cap, one per line)",
+            "AAPL: 2900000000000\nMSFT: 3100000000000\nNVDA: 3000000000000",
+        )
+        views_str = st.text_area(
+            "Views (ticker: expected_return, one per line)",
+            "MSFT: 0.11\nAAPL: 0.08",
+        )
+        bl_tau = st.number_input(
+            "BL tau (blend strength)", value=0.05, step=0.01, format="%.2f"
+        )
         market_caps = parse_kv(caps_str) if caps_str.strip() else None
         views = parse_kv(views_str) if views_str.strip() else None
         bl_inputs = dict(market_caps=market_caps, views=views, bl_tau=bl_tau)
@@ -173,7 +234,9 @@ with tab_data:
             else:
                 cfg = DataConfig(tickers=selected_tickers, start=start, end=(end or None))
                 prices = fetch_prices(cfg)
-                st.success(f"Fetched {prices.shape[0]} rows × {prices.shape[1]} assets")
+                st.success(
+                    f"Fetched {prices.shape[0]} rows × {prices.shape[1]} assets"
+                )
                 st.dataframe(prices.tail().round(2), use_container_width=True)
 
                 daily, monthly = daily_and_monthly_returns(prices)
@@ -184,8 +247,10 @@ with tab_data:
                 st.subheader("Correlation Heatmap")
                 corr = daily.corr()
                 fig_corr = px.imshow(
-                    corr, text_auto=True, aspect="auto",
-                    title="Asset Correlations (daily returns)"
+                    corr,
+                    text_auto=True,
+                    aspect="auto",
+                    title="Asset Correlations (daily returns)",
                 )
                 st.plotly_chart(fig_corr, use_container_width=True)
         except Exception as e:
@@ -222,26 +287,48 @@ with tab_opt:
                 with c1:
                     st.dataframe(wdf, use_container_width=True)
                 with c2:
-                    fig_pie = px.pie(wdf, names="Asset", values="Weight", title="Portfolio Allocation")
+                    fig_pie = px.pie(
+                        wdf,
+                        names="Asset",
+                        values="Weight",
+                        title="Portfolio Allocation",
+                    )
                     st.plotly_chart(fig_pie, use_container_width=True)
 
                 # Metrics
                 st.subheader("Key Metrics")
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Expected Return (ann.)", f"{res['expected_return']*100:.2f}%")
-                m2.metric("Volatility (ann.)", f"{res['volatility']*100:.2f}%")
+                m1.metric(
+                    "Expected Return (ann.)",
+                    f"{res['expected_return']*100:.2f}%",
+                )
+                m2.metric(
+                    "Volatility (ann.)",
+                    f"{res['volatility']*100:.2f}%",
+                )
                 m3.metric("Sharpe", f"{res['sharpe']:.2f}")
 
                 # Efficient frontier
                 st.subheader("Efficient Frontier")
-                frontier = pd.DataFrame({"Risk": res["frontier"]["risks"], "Return": res["frontier"]["returns"]})
-                fig_front = px.line(frontier, x="Risk", y="Return", markers=True, title="Risk vs Return")
+                frontier = pd.DataFrame(
+                    {
+                        "Risk": res["frontier"]["risks"],
+                        "Return": res["frontier"]["returns"],
+                    }
+                )
+                fig_front = px.line(
+                    frontier,
+                    x="Risk",
+                    y="Return",
+                    markers=True,
+                    title="Risk vs Return",
+                )
                 fig_front.add_scatter(
                     x=[res["volatility"]],
                     y=[res["expected_return"]],
                     mode="markers",
                     name="Optimal",
-                    marker=dict(size=12)
+                    marker=dict(size=12),
                 )
                 st.plotly_chart(fig_front, use_container_width=True)
 
@@ -249,9 +336,14 @@ with tab_opt:
                 if "discrete_allocation" in res:
                     st.subheader("Discrete Allocation (Whole Shares)")
                     da = res["discrete_allocation"]
-                    shares_df = pd.DataFrame(list(da["shares"].items()), columns=["Asset", "Shares"])
+                    shares_df = pd.DataFrame(
+                        list(da["shares"].items()), columns=["Asset", "Shares"]
+                    )
                     st.dataframe(shares_df, use_container_width=True)
-                    st.info(f"Leftover cash: ${da['leftover_cash']:.2f} on capital ${da['capital']:.2f}")
+                    st.info(
+                        f"Leftover cash: ${da['leftover_cash']:.2f} "
+                        f"on capital ${da['capital']:.2f}"
+                    )
 
                 # BL details (if used)
                 if objective == "black_litterman" and "black_litterman" in res:
