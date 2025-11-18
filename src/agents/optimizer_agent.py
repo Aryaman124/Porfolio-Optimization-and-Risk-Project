@@ -1,4 +1,4 @@
-# OPTIMIZER AGENT 
+# OPTIMIZER AGENT
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -10,7 +10,7 @@ from pypfopt.expected_returns import mean_historical_return
 from pypfopt.risk_models import CovarianceShrinkage
 from pypfopt.efficient_frontier import EfficientFrontier
 from pypfopt.discrete_allocation import DiscreteAllocation, get_latest_prices
-from pypfopt.black_litterman import BlackLittermanModel, market_implied_risk_aversion
+from pypfopt.black_litterman import BlackLittermanModel, market_implied_prior_returns
 
 from src.agents.data_agent import DataConfig, fetch_prices
 
@@ -36,7 +36,6 @@ class OptConfig:
     # market_caps: map ticker -> market cap (float, e.g., 2.9e12)
     market_caps: Optional[Dict[str, float]] = None
     # views: your absolute expected annual returns per ticker (e.g., {"MSFT": 0.10, "AAPL": 0.08})
-    # (You could extend later to support relative views.)
     views: Optional[Dict[str, float]] = None
     # blending parameter (typical 0.02–0.10)
     bl_tau: float = 0.05
@@ -58,40 +57,57 @@ def _compute_mu_S(prices: pd.DataFrame, cfg: OptConfig) -> tuple[pd.Series, pd.D
     Compute expected returns (mu) and covariance (S) depending on objective.
     - For BL, blend market equilibrium with provided views.
     - Otherwise, use historical-mean + Ledoit–Wolf shrinkage.
-    Returns (mu, S) annualized.
+
+    Returns (mu, S) annualized, with indices aligned to the price columns.
     """
+    # Always start from a shrinkage covariance, aligned with asset columns
+    tickers = list(prices.columns)
+    S = CovarianceShrinkage(prices).ledoit_wolf()
+
+    # ---------- BLACK–LITTERMAN PATH ----------
     if cfg.objective.lower() == "black_litterman":
-        # Need a covariance estimate (annualized)
-        S = CovarianceShrinkage(prices).ledoit_wolf()
+        market_caps = cfg.market_caps or {}
+        views = cfg.views or {}
 
-        # Require market_caps and at least one view; otherwise fallback
-        if not cfg.market_caps or not cfg.views:
-            # Graceful fallback: historical means if BL inputs are missing
-            mu_hist = mean_historical_return(prices)
-            return mu_hist, S
+        # Build market-cap-weight vector in the same order as 'tickers'
+        caps_vec = np.array([market_caps.get(t, 0.0) for t in tickers], dtype=float)
 
-        # Market risk aversion (optional input to BL; derived from market history)
-        try:
-            delta = market_implied_risk_aversion(market_prices=prices)
-        except Exception:
-            delta = None  # BL can still run without explicit delta
+        if caps_vec.sum() > 0:
+            mkt_weights = caps_vec / caps_vec.sum()
+            # Typical risk aversion parameter; can be tuned later if you want
+            delta = 2.5
+            pi = market_implied_prior_returns(mkt_weights, S, delta)
+        else:
+            # No market caps → no equilibrium prior; BL will just lean on views/cov
+            pi = None
+
+        # Absolute views: keep only tickers that are actually in our universe
+        if views:
+            q_series = pd.Series({t: v for t, v in views.items() if t in tickers})
+        else:
+            q_series = None
 
         bl = BlackLittermanModel(
             S,
-            pi="market",                          # start from market-implied equilibrium
-            market_caps=cfg.market_caps,          # dict aligned to tickers
-            absolute_views=cfg.views,             # user's/AI's absolute views
-            omega="idzorek",                      # view uncertainty scaling
-            tau=cfg.bl_tau                        # blend strength
+            pi=pi,
+            absolute_views=q_series,
+            tau=cfg.bl_tau,
         )
 
         mu_bl = bl.bl_returns()
         S_bl = bl.bl_cov()
+
+        # Make sure mu and S are ordered exactly like 'tickers'
+        mu_bl = mu_bl[tickers]
+        S_bl = S_bl.loc[tickers, tickers]
+
         return mu_bl, S_bl
 
-    # Default path: historical returns + shrinkage covariance
+    # ---------- DEFAULT (HISTORICAL MEAN-VAR) ----------
     mu = mean_historical_return(prices)
-    S = CovarianceShrinkage(prices).ledoit_wolf()
+    # Ensure the ordering matches the columns/tickers
+    mu = mu[prices.columns]
+
     return mu, S
 
 
@@ -105,10 +121,13 @@ def run_optimization(cfg: OptConfig) -> Dict[str, Any]:
     # 2) Expected returns (annualized) & covariance (annualized)
     mu, S = _compute_mu_S(prices, cfg)
 
-    # 3) Optimize
-    ef = EfficientFrontier(mu, S, weight_bounds=_bounds(len(cfg.tickers), cfg.max_weight, cfg.long_only))
+    # Use the actual tickers present in mu/S (in case some were dropped)
+    tickers = list(mu.index)
 
-    # If BL objective, default to max_sharpe on the BL-adjusted mu/S
+    # 3) Optimize
+    ef = EfficientFrontier(mu, S, weight_bounds=_bounds(len(tickers), cfg.max_weight, cfg.long_only))
+
+    # If BL objective, we already baked BL into mu/S, then still choose max_sharpe
     if cfg.objective == "min_volatility":
         ef.min_volatility()
     else:
@@ -124,13 +143,14 @@ def run_optimization(cfg: OptConfig) -> Dict[str, Any]:
     frontier_r, frontier_s = [], []
     for tr in targets:
         try:
-            ef_t = EfficientFrontier(mu, S, weight_bounds=_bounds(len(cfg.tickers), cfg.max_weight, cfg.long_only))
+            ef_t = EfficientFrontier(mu, S, weight_bounds=_bounds(len(tickers), cfg.max_weight, cfg.long_only))
             ef_t.efficient_return(tr)
             rr, ss, _ = ef_t.portfolio_performance(risk_free_rate=cfg.risk_free_rate)
             frontier_r.append(float(rr))
             frontier_s.append(float(ss))
         except Exception:
-            continue  # infeasible target → skip
+            # infeasible target → skip
+            continue
 
     out: Dict[str, Any] = {
         "weights": raw_weights,
@@ -138,7 +158,7 @@ def run_optimization(cfg: OptConfig) -> Dict[str, Any]:
         "volatility": float(exp_vol),
         "sharpe": float(exp_sharpe),
         "frontier": {"returns": frontier_r, "risks": frontier_s},
-        "universe": cfg.tickers,
+        "universe": tickers,
         "start": cfg.start,
         "end": cfg.end,
         "objective": cfg.objective,
@@ -150,16 +170,23 @@ def run_optimization(cfg: OptConfig) -> Dict[str, Any]:
     # 5) Optional: discrete allocation (convert weights → whole shares given capital)
     if cfg.capital is not None and cfg.capital > 0:
         latest = get_latest_prices(prices)
-        weights_vec = np.array([raw_weights.get(t, 0.0) for t in cfg.tickers], dtype=float)
+
+        # Build weight vector in the same order as 'tickers'
+        weights_vec = np.array([raw_weights.get(t, 0.0) for t in tickers], dtype=float)
         weights_vec = weights_vec / (weights_vec.sum() if weights_vec.sum() > 0 else 1.0)
-        weights_map = {t: w for t, w in zip(cfg.tickers, weights_vec)}
-        da = DiscreteAllocation(weights_map, latest_prices=latest, total_portfolio_value=float(cfg.capital))
+        weights_map = {t: w for t, w in zip(tickers, weights_vec)}
+
+        da = DiscreteAllocation(
+            weights_map,
+            latest_prices=latest,
+            total_portfolio_value=float(cfg.capital),
+        )
         allocation, leftover = da.greedy_portfolio()  # or da.lp_portfolio()
 
         out["discrete_allocation"] = {
             "capital": float(cfg.capital),
             "shares": allocation,
-            "leftover_cash": float(leftover)
+            "leftover_cash": float(leftover),
         }
 
     # 6) If BL used, echo inputs for transparency
