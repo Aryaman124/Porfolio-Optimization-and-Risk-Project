@@ -336,13 +336,19 @@ with tab_opt:
                 if "discrete_allocation" in res:
                     st.subheader("Discrete Allocation (Whole Shares)")
                     da = res["discrete_allocation"]
-                    shares_df = pd.DataFrame(
-                        list(da["shares"].items()), columns=["Asset", "Shares"]
-                    )
+                    shares_df = pd.DataFrame(list(da["shares"].items()), columns=["Asset", "Shares"])
                     st.dataframe(shares_df, use_container_width=True)
-                    st.info(
-                        f"Leftover cash: ${da['leftover_cash']:.2f} "
-                        f"on capital ${da['capital']:.2f}"
+
+                    leftover = da["leftover_cash"]
+                    cap = da["capital"]
+
+                    st.markdown(
+                        f"""
+                        <p style="font-size:16px;">
+                        <b>Leftover cash:</b> ${leftover:,.2f} <b>Left of</b> ${cap:,.2f} Capital
+                        </p>
+                        """,
+                        unsafe_allow_html=True
                     )
 
                 # BL details (if used)
@@ -352,3 +358,5 @@ with tab_opt:
 
         except Exception as e:
             st.error(f"Optimization error: {e}")
+
+
