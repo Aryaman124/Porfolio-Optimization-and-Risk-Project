@@ -13,7 +13,7 @@ from src.agents.data_agent import (
     summary_stats,
 )
 from src.agents.optimizer_agent import OptConfig, run_optimization
-from src.data.ticker_names import TICKER_NAMES  # <-- your dictionary
+from data.ticker_names import TICKER_NAMES  # <-- your dictionary
 
 st.set_page_config(page_title="PortfolioQuant.ai", page_icon="📈", layout="wide")
 

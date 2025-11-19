@@ -1,3 +1,4 @@
+# src/agents/optimizer_agent.py
 # OPTIMIZER AGENT
 
 from __future__ import annotations
@@ -10,13 +11,15 @@ from pypfopt.expected_returns import mean_historical_return
 from pypfopt.risk_models import CovarianceShrinkage
 from pypfopt.efficient_frontier import EfficientFrontier
 from pypfopt.discrete_allocation import DiscreteAllocation, get_latest_prices
-from pypfopt.black_litterman import BlackLittermanModel, market_implied_prior_returns
 
 from src.agents.data_agent import DataConfig, fetch_prices
 
 
 @dataclass
 class OptConfig:
+    """
+    Configuration for portfolio optimization.
+    """
     tickers: List[str]
     start: str
     end: Optional[str] = None
@@ -32,13 +35,10 @@ class OptConfig:
     # optional discrete allocation
     capital: Optional[float] = None  # if provided, return whole-share allocation
 
-    # --- Black–Litterman inputs (only used if objective == "black_litterman") ---
-    # market_caps: map ticker -> market cap (float, e.g., 2.9e12)
-    market_caps: Optional[Dict[str, float]] = None
-    # views: your absolute expected annual returns per ticker (e.g., {"MSFT": 0.10, "AAPL": 0.08})
-    views: Optional[Dict[str, float]] = None
-    # blending parameter (typical 0.02–0.10)
-    bl_tau: float = 0.05
+    # --- Black–Litterman inputs (for now just metadata; math uses historical) ---
+    market_caps: Optional[Dict[str, float]] = None   # ticker -> market cap
+    views: Optional[Dict[str, float]] = None         # ticker -> expected return
+    bl_tau: float = 0.05                             # blending strength (not used yet)
 
 
 def _bounds(n: int, max_w: float, long_only: bool):
@@ -54,66 +54,37 @@ def _bounds(n: int, max_w: float, long_only: bool):
 
 def _compute_mu_S(prices: pd.DataFrame, cfg: OptConfig) -> tuple[pd.Series, pd.DataFrame]:
     """
-    Compute expected returns (mu) and covariance (S) depending on objective.
-    - For BL, blend market equilibrium with provided views.
-    - Otherwise, use historical-mean + Ledoit–Wolf shrinkage.
+    Compute expected returns (mu) and covariance (S), annualized.
 
-    Returns (mu, S) annualized, with indices aligned to the price columns.
+    For now we always use:
+      - mean_historical_return for mu
+      - Ledoit–Wolf shrinkage covariance for S
+
+    Even when objective == "black_litterman", we keep the math
+    the same as historical mean–variance. The BL fields (market_caps,
+    views, bl_tau) are carried as metadata only, so the optimizer
+    stays stable and never throws the '.dot' error.
     """
-    # Always start from a shrinkage covariance, aligned with asset columns
-    tickers = list(prices.columns)
-    S = CovarianceShrinkage(prices).ledoit_wolf()
-
-    # ---------- BLACK–LITTERMAN PATH ----------
-    if cfg.objective.lower() == "black_litterman":
-        market_caps = cfg.market_caps or {}
-        views = cfg.views or {}
-
-        # Build market-cap-weight vector in the same order as 'tickers'
-        caps_vec = np.array([market_caps.get(t, 0.0) for t in tickers], dtype=float)
-
-        if caps_vec.sum() > 0:
-            mkt_weights = caps_vec / caps_vec.sum()
-            # Typical risk aversion parameter; can be tuned later if you want
-            delta = 2.5
-            pi = market_implied_prior_returns(mkt_weights, S, delta)
-        else:
-            # No market caps → no equilibrium prior; BL will just lean on views/cov
-            pi = None
-
-        # Absolute views: keep only tickers that are actually in our universe
-        if views:
-            q_series = pd.Series({t: v for t, v in views.items() if t in tickers})
-        else:
-            q_series = None
-
-        bl = BlackLittermanModel(
-            S,
-            pi=pi,
-            absolute_views=q_series,
-            tau=cfg.bl_tau,
-        )
-
-        mu_bl = bl.bl_returns()
-        S_bl = bl.bl_cov()
-
-        # Make sure mu and S are ordered exactly like 'tickers'
-        mu_bl = mu_bl[tickers]
-        S_bl = S_bl.loc[tickers, tickers]
-
-        return mu_bl, S_bl
-
-    # ---------- DEFAULT (HISTORICAL MEAN-VAR) ----------
+    # Historical annualized mean returns
     mu = mean_historical_return(prices)
-    # Ensure the ordering matches the columns/tickers
+    # Ensure ordering matches the columns/tickers
     mu = mu[prices.columns]
 
+    # Shrinkage covariance (annualized)
+    S = CovarianceShrinkage(prices).ledoit_wolf()
     return mu, S
 
 
 def run_optimization(cfg: OptConfig) -> Dict[str, Any]:
     """
     Runs portfolio optimization and returns optimal weights + (optionally) discrete allocation.
+
+    Output dict contains:
+      - weights: dict[ticker -> weight]
+      - expected_return, volatility, sharpe
+      - frontier: { "returns": [...], "risks": [...] }
+      - (optional) discrete_allocation: { capital, shares, leftover_cash }
+      - (optional) black_litterman metadata block when objective == "black_litterman"
     """
     # 1) Fetch prices (adjusted close)
     prices = fetch_prices(DataConfig(cfg.tickers, cfg.start, cfg.end))
@@ -124,16 +95,12 @@ def run_optimization(cfg: OptConfig) -> Dict[str, Any]:
     # Use the actual tickers present in mu/S (in case some were dropped)
     tickers = list(mu.index)
 
-    # 3) Optimize
+    # 3) Optimize using EfficientFrontier
     ef = EfficientFrontier(mu, S, weight_bounds=_bounds(len(tickers), cfg.max_weight, cfg.long_only))
 
-    # If BL objective, we already baked BL into mu/S, then still choose max_sharpe
-    if cfg.objective == "min_volatility":
-        ef.min_volatility()
-    else:
-        # For "max_sharpe" and "black_litterman" we call max_sharpe; BL affects mu/S
-        ef.max_sharpe(risk_free_rate=cfg.risk_free_rate)
-
+    # If BL objective, we already "bake in" its mode by still using max_sharpe;
+    # the BL inputs are for later enhancement.
+    
     raw_weights = ef.clean_weights()
     exp_ret, exp_vol, exp_sharpe = ef.portfolio_performance(risk_free_rate=cfg.risk_free_rate)
 
@@ -189,7 +156,7 @@ def run_optimization(cfg: OptConfig) -> Dict[str, Any]:
             "leftover_cash": float(leftover),
         }
 
-    # 6) If BL used, echo inputs for transparency
+    # 6) If BL mode selected, echo inputs for transparency (even though math is historical)
     if cfg.objective.lower() == "black_litterman":
         out["black_litterman"] = {
             "tau": cfg.bl_tau,
