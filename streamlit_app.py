@@ -1,10 +1,13 @@
 # streamlit_app.py
 from pathlib import Path
 import json
+from typing import Dict
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from dotenv import load_dotenv
 
 from src.agents.data_agent import (
     DataConfig,
@@ -14,9 +17,11 @@ from src.agents.data_agent import (
 )
 from src.agents.optimizer_agent import OptConfig, run_optimization
 from src.agents.risk_agent import RiskConfig, run_risk
-from src.agents.backtest_agent import BacktestConfig, run_backtest
-from data.ticker_names import TICKER_NAMES  # your ticker -> name dict
+from src.agents.ai_explainer import explain_risk_from_dict
+from data.ticker_names import TICKER_NAMES  # your dict of ticker -> name
 
+# Load .env so GOOGLE_API_KEY etc. are available
+load_dotenv()
 
 st.set_page_config(page_title="PortfolioQuant.ai", page_icon="📈", layout="wide")
 
@@ -37,29 +42,19 @@ def load_universe() -> list[str]:
         ]
         return sorted(list(dict.fromkeys(tickers)))
     return [
-        "AAPL",
-        "MSFT",
-        "NVDA",
-        "AMZN",
-        "GOOGL",
-        "META",
-        "TSLA",
-        "BRK-B",
-        "JPM",
-        "V",
-        "XOM",
-        "UNH",
-        "AVGO",
+        "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA",
+        "BRK-B", "JPM", "V", "XOM", "UNH", "AVGO"
     ]
 
 
-def weights_to_df(weights: dict) -> pd.DataFrame:
+def weights_to_df(weights: Dict[str, float]) -> pd.DataFrame:
     df = pd.DataFrame(list(weights.items()), columns=["Asset", "Weight"])
     df["Weight %"] = (df["Weight"] * 100).round(2)
     return df.sort_values("Weight", ascending=False).reset_index(drop=True)
 
 
 def parse_kv(text: str) -> dict[str, float]:
+    """Parse 'TICKER: value' lines into a dict."""
     out: dict[str, float] = {}
     for line in text.splitlines():
         if ":" in line:
@@ -67,13 +62,11 @@ def parse_kv(text: str) -> dict[str, float]:
             try:
                 out[k.strip().upper()] = float(v.strip())
             except Exception:
-                # ignore bad lines
                 pass
     return out
 
 
 def fmt_ticker(t: str) -> str:
-    """Show 'TICKER — Company Name' in the UI."""
     name = TICKER_NAMES.get(t, "")
     return f"{t} — {name}" if name else t
 
@@ -140,11 +133,10 @@ st.sidebar.title("⚙️ Settings")
 universe = load_universe()
 default_focus = [t for t in ["AAPL", "MSFT", "NVDA"] if t in universe] or universe[:3]
 
-# session state for ticker selections
 if "selected_tickers" not in st.session_state:
     st.session_state["selected_tickers"] = default_focus
 
-st.sidebar.multiselect(
+selected = st.sidebar.multiselect(
     "Select tickers",
     options=universe,
     default=st.session_state["selected_tickers"],
@@ -162,7 +154,7 @@ selected_tickers = st.session_state["selected_tickers"]
 
 col_dates = st.sidebar.columns(2)
 start = col_dates[0].text_input("Start (YYYY-MM-DD)", "2023-01-01")
-end = col_dates[1].text_input("End (YYYY-MM-DD, optional)", "")
+end = col_dates[1].text_input("End (YYYY-MM-DD)", "")
 
 objective = st.sidebar.selectbox(
     "Objective",
@@ -179,7 +171,7 @@ risk_free_rate = st.sidebar.number_input(
     format="%.4f",
 )
 
-with st.sidebar.expander("💵 Capital (optional, for shares / backtest)"):
+with st.sidebar.expander("💵 Capital (optional, for share counts)", expanded=False):
     capital = st.number_input(
         "Total portfolio capital ($)",
         value=0.0,
@@ -193,7 +185,7 @@ bl_inputs: dict = {}
 if objective == "black_litterman":
     with st.sidebar.expander("🧠 Black–Litterman Inputs", expanded=True):
         st.caption(
-            "Provide market caps and absolute views (annual expected returns).\n"
+            "Provide market caps and absolute views (annual expected returns). "
             "Leave blank to fallback to historical."
         )
         caps_str = st.text_area(
@@ -204,7 +196,9 @@ if objective == "black_litterman":
             "Views (ticker: expected_return, one per line)",
             "MSFT: 0.11\nAAPL: 0.08",
         )
-        bl_tau = st.number_input("BL tau (blend strength)", value=0.05, step=0.01)
+        bl_tau = st.number_input(
+            "BL tau (blend strength)", value=0.05, step=0.01, format="%.2f"
+        )
         market_caps = parse_kv(caps_str) if caps_str.strip() else None
         views = parse_kv(views_str) if views_str.strip() else None
         bl_inputs = dict(market_caps=market_caps, views=views, bl_tau=bl_tau)
@@ -219,11 +213,11 @@ render_fixed_ticker_tape()
 st.divider()
 
 # =============================================================
-# Tabs: Data / Optimize / Risk / Backtest
+# Tabs (Data / Optimize / Risk / Chat)
 # =============================================================
 
-tab_data, tab_opt, tab_risk, tab_bt = st.tabs(
-    ["📊 Data", "🧮 Optimize", "⚠️ Risk", "⏪ Backtest"]
+tab_data, tab_opt, tab_risk, tab_chat = st.tabs(
+    ["📊 Data", "🧮 Optimize", "⚠️ Risk", "💬 AI Chat"]
 )
 
 # ============================= DATA TAB =============================
@@ -237,25 +231,15 @@ with tab_data:
             else:
                 cfg = DataConfig(selected_tickers, start, end or None)
                 prices = fetch_prices(cfg)
-                st.success(
-                    f"Fetched {prices.shape[0]} rows × {prices.shape[1]} assets"
-                )
+                st.success(f"Fetched {prices.shape[0]} rows × {prices.shape[1]} assets")
                 st.dataframe(prices.tail().round(2), use_container_width=True)
 
                 daily, monthly = daily_and_monthly_returns(prices)
                 st.subheader("Summary Stats (annualized)")
-                st.dataframe(
-                    summary_stats(daily).round(4),
-                    use_container_width=True,
-                )
+                st.dataframe(summary_stats(daily).round(4), use_container_width=True)
 
                 st.subheader("Correlation Heatmap")
-                fig = px.imshow(
-                    daily.corr(),
-                    text_auto=True,
-                    aspect="auto",
-                    title="Asset Correlations (daily returns)",
-                )
+                fig = px.imshow(daily.corr(), text_auto=True, aspect="auto")
                 st.plotly_chart(fig, use_container_width=True)
 
         except Exception as e:
@@ -266,7 +250,8 @@ with tab_data:
 with tab_opt:
     st.header("🧮 Portfolio Optimization")
 
-    if st.button("Run Optimization", type="primary"):
+    run_it = st.button("Run Optimization", type="primary")
+    if run_it:
         try:
             if not selected_tickers:
                 st.warning("Please select at least one ticker.")
@@ -286,33 +271,19 @@ with tab_opt:
 
                 res = run_optimization(OptConfig(**opt_kwargs))
 
-                # Save for Backtest tab
+                # Store in session so Risk tab / Chat tab can use it
                 st.session_state["last_opt_result"] = res
 
                 st.subheader("Allocation")
                 wdf = weights_to_df(res["weights"])
                 c1, c2 = st.columns([1, 1])
                 c1.dataframe(wdf, use_container_width=True)
-                c2.plotly_chart(
-                    px.pie(
-                        wdf,
-                        names="Asset",
-                        values="Weight",
-                        title="Portfolio Allocation",
-                    ),
-                    use_container_width=True,
-                )
+                c2.plotly_chart(px.pie(wdf, names="Asset", values="Weight"), use_container_width=True)
 
                 st.subheader("Key Metrics")
                 m1, m2, m3 = st.columns(3)
-                m1.metric(
-                    "Expected Return (ann.)",
-                    f"{res['expected_return']*100:.2f}%",
-                )
-                m2.metric(
-                    "Volatility (ann.)",
-                    f"{res['volatility']*100:.2f}%",
-                )
+                m1.metric("Expected Return", f"{res['expected_return']*100:.2f}%")
+                m2.metric("Volatility", f"{res['volatility']*100:.2f}%")
                 m3.metric("Sharpe", f"{res['sharpe']:.2f}")
 
                 st.subheader("Efficient Frontier")
@@ -331,10 +302,8 @@ with tab_opt:
 
                 if "discrete_allocation" in res:
                     da = res["discrete_allocation"]
-                    st.subheader("Discrete Allocation (Whole Shares)")
-                    shares_df = pd.DataFrame(
-                        list(da["shares"].items()), columns=["Asset", "Shares"]
-                    )
+                    st.subheader("Discrete Allocation")
+                    shares_df = pd.DataFrame(list(da["shares"].items()), columns=["Asset", "Shares"])
                     st.dataframe(shares_df, use_container_width=True)
 
                     leftover = da["leftover_cash"]
@@ -355,142 +324,143 @@ with tab_opt:
 # ============================= RISK TAB =============================
 with tab_risk:
     st.header("⚠️ Risk Analysis")
-    st.caption("Uses an equal-weight portfolio for now. We can later plug in optimizer weights.")
+
+    weight_mode = st.radio(
+        "Weights for risk analysis",
+        ["Equal weight", "Use last optimized weights"],
+        horizontal=True,
+    )
 
     if st.button("Run Risk Analysis", type="primary"):
         try:
             if not selected_tickers:
                 st.warning("Please select at least one ticker.")
             else:
+                custom_weights: Dict[str, float] | None = None
+
+                if weight_mode == "Use last optimized weights":
+                    if "last_opt_result" not in st.session_state:
+                        st.warning(
+                            "No optimization result found. Run the optimizer first or use Equal weight."
+                        )
+                    else:
+                        opt_res = st.session_state["last_opt_result"]
+                        opt_w = opt_res.get("weights", {})
+                        # Restrict weights to currently selected tickers and renormalize
+                        w_vec = {t: float(opt_w.get(t, 0.0)) for t in selected_tickers}
+                        total = sum(w_vec.values())
+                        if total > 0:
+                            custom_weights = {t: w / total for t, w in w_vec.items()}
+                        else:
+                            st.warning(
+                                "Optimized weights sum to 0 for current selection. Falling back to equal weight."
+                            )
+                            custom_weights = None
+
                 rcfg = RiskConfig(
                     tickers=selected_tickers,
                     start=start,
                     end=(end or None),
                     risk_free_rate=risk_free_rate,
+                    weights=custom_weights,
                 )
 
                 risk = run_risk(rcfg)
 
+                # Save risk result so Chat tab can use it
+                st.session_state["last_risk_result"] = risk
+
+                # Show metrics (convert to % where it makes sense)
                 st.subheader("Risk Metrics (annualized)")
-
-                # Format as % where it makes sense
-                raw_metrics = risk["metrics"]
-                display_rows = []
-                for k, v in raw_metrics.items():
-                    key_lower = k.lower()
-                    if key_lower in [
-                        "annual_return",
-                        "annual_volatility",
-                        "var_95",
-                        "cvar_95",
-                        "max_drawdown",
-                    ]:
-                        display_rows.append((k, f"{v * 100:.2f}%"))
-                    else:
-                        # e.g. Sharpe, beta, etc.
-                        display_rows.append((k, f"{v:.4f}"))
-
-                metrics_df = pd.DataFrame(display_rows, columns=["Metric", "Value"])
+                metrics = risk["metrics"].copy()
+                display_metrics = {
+                    "annual_return (%)": metrics["annual_return"] * 100,
+                    "annual_volatility (%)": metrics["annual_volatility"] * 100,
+                    "sharpe": metrics["sharpe"],
+                    "VaR 95% (daily, %)": metrics["var_95"] * 100,
+                    "CVaR 95% (daily, %)": metrics["cvar_95"] * 100,
+                    "max_drawdown (%)": metrics["max_drawdown"] * 100,
+                }
+                metrics_df = (
+                    pd.DataFrame.from_dict(display_metrics, orient="index", columns=["Value"])
+                    .round(4)
+                )
                 st.dataframe(metrics_df, use_container_width=True)
 
                 st.subheader("Weights Used (Risk)")
-                wdf = pd.DataFrame(
-                    list(risk["weights"].items()), columns=["Asset", "Weight"]
-                )
+                wdf = pd.DataFrame(list(risk["weights"].items()), columns=["Asset", "Weight"])
                 wdf["Weight %"] = (wdf["Weight"] * 100).round(2)
-                st.dataframe(wdf, use_container_width=True)
+                st.dataframe(wdf.sort_values("Weight", ascending=False), use_container_width=True)
 
                 st.subheader("Cumulative Portfolio Return")
                 cum = risk["series"]["cumulative_returns"]
                 st.line_chart(cum)
 
+                # AI explanation for the risk metrics
+                st.subheader("🧠 AI Explanation")
+                with st.spinner("Thinking about your risk profile..."):
+                    explanation = explain_risk_from_dict(risk["metrics"], risk["weights"])
+                st.write(explanation)
+
         except Exception as e:
             st.error(f"Risk analysis error: {e}")
 
 
-# ============================= BACKTEST TAB =============================
-with tab_bt:
-    st.header("⏪ Backtest Portfolio")
+# ============================= CHAT TAB (GPT-style UI) =============================
+with tab_chat:
+    st.header("💬 AI Portfolio Chatbot")
+
     st.caption(
-        "Simulate how this portfolio would have performed historically.\n"
-        "You can use equal-weight or the last optimized allocation."
+        "Ask questions about your portfolio, optimization results, or risk profile. "
+        "If no portfolio is loaded yet, I can still chat normally."
     )
 
-    bt_mode = st.radio(
-        "Weights to use for backtest",
-        ["Equal-weight (selected tickers)", "Use last optimized weights"],
-        index=0,
-    )
+    # Chat history as list of dicts: {"role": "user"|"assistant", "content": str}
+    if "chat_history" not in st.session_state:
+        st.session_state["chat_history"] = []
 
-    if st.button("Run Backtest", type="primary"):
-        try:
-            if bt_mode.startswith("Equal"):
-                # Use current sidebar tickers, equal-weight
-                if not selected_tickers:
-                    st.warning("Please select at least one ticker.")
-                else:
-                    bt_tickers = selected_tickers
-                    bt_weights = None
-                    bt_start = start
-                    bt_end = end or None
-            else:
-                # Use last optimization result
-                if "last_opt_result" not in st.session_state:
-                    st.warning("Run an optimization first in the 'Optimize' tab.")
-                    bt_tickers = None  # just to avoid reference error
-                else:
-                    last = st.session_state["last_opt_result"]
-                    bt_tickers = last["universe"]
-                    bt_weights = last["weights"]
-                    bt_start = last.get("start", start)
-                    bt_end = last.get("end", end or None)
+    # Render previous messages as chat bubbles
+    for msg in st.session_state["chat_history"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-            if bt_mode.startswith("Use last") and "last_opt_result" not in st.session_state:
-                # no backtest because no optimization yet
-                st.stop()
+    # Chat input at the bottom (like GPT)
+    user_msg = st.chat_input("Ask about your portfolio...")
+    if user_msg:
+        # 1) Add user message
+        st.session_state["chat_history"].append(
+            {"role": "user", "content": user_msg}
+        )
 
-            if not bt_tickers:
-                st.warning("No tickers available for backtest.")
-                st.stop()
+        # 2) Build context: use last risk or last optimization if present
+        metrics_ctx = None
+        weights_ctx = None
 
-            initial_cap = capital if capital is not None else 100000.0
+        if "last_risk_result" in st.session_state:
+            r = st.session_state["last_risk_result"]
+            metrics_ctx = r.get("metrics")
+            weights_ctx = r.get("weights")
+        elif "last_opt_result" in st.session_state:
+            o = st.session_state["last_opt_result"]
+            metrics_ctx = {
+                "annual_return": o.get("expected_return", 0.0),
+                "annual_volatility": o.get("volatility", 0.0),
+                "sharpe": o.get("sharpe", 0.0),
+            }
+            weights_ctx = o.get("weights", {})
 
-            cfg_bt = BacktestConfig(
-                tickers=bt_tickers,
-                start=bt_start,
-                end=bt_end,
-                weights=bt_weights,
-                initial_capital=initial_cap,
-                risk_free_rate=risk_free_rate,
+        # 3) Generate answer (works even if metrics_ctx is None)
+        with st.spinner("Thinking..."):
+            bot_reply = explain_risk_from_dict(
+                metrics=metrics_ctx,
+                weights=weights_ctx,
+                question=user_msg,
             )
 
-            bt = run_backtest(cfg_bt)
+        # 4) Add bot message
+        st.session_state["chat_history"].append(
+            {"role": "assistant", "content": bot_reply}
+        )
 
-            st.subheader("Backtest Metrics")
-
-            m = bt["metrics"]
-            rows = []
-            for k, v in m.items():
-                k_lower = k.lower()
-                if k_lower in ["total_return", "annual_return", "annual_volatility", "max_drawdown"]:
-                    rows.append((k, f"{v * 100:.2f}%"))
-                else:
-                    rows.append((k, f"{v:.4f}"))
-            mdf = pd.DataFrame(rows, columns=["Metric", "Value"])
-            st.dataframe(mdf, use_container_width=True)
-
-            st.subheader("Weights Used in Backtest")
-            wdf = pd.DataFrame(list(bt["weights"].items()), columns=["Asset", "Weight"])
-            wdf["Weight %"] = (wdf["Weight"] * 100).round(2)
-            st.dataframe(wdf, use_container_width=True)
-
-            st.subheader("Cumulative Return")
-            cum = bt["series"]["cumulative_returns"]
-            st.line_chart(cum)
-
-            st.subheader("Portfolio Value Over Time")
-            vals = bt["series"]["portfolio_values"]
-            st.line_chart(vals)
-
-        except Exception as e:
-            st.error(f"Backtest error: {e}")
+        # Re-run to show new messages immediately
+        st.rerun()

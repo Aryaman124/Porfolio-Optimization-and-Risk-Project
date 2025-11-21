@@ -1,80 +1,139 @@
 # src/agents/ai_explainer.py
+
 from __future__ import annotations
 
 import os
 from typing import Dict, Optional
 
+from dotenv import load_dotenv
 from google import genai
 
-# Use GEMINI_MODEL from .env or fall back
-MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
+# --------------------------------------------------
+# Load environment + create Gemini client
+# --------------------------------------------------
+
+# Load .env once (safe to call multiple times)
+load_dotenv()
+
+API_KEY = os.getenv("GOOGLE_API_KEY")
+VERTEX_PROJECT = os.getenv("VERTEX_PROJECT")
+VERTEX_LOCATION = os.getenv("VERTEX_LOCATION")
+
+if API_KEY:
+    client = genai.Client(api_key=API_KEY)
+elif VERTEX_PROJECT and VERTEX_LOCATION:
+    # Optional Vertex AI path – only if you actually use it
+    client = genai.Client(
+        vertexai={
+            "project": VERTEX_PROJECT,
+            "location": VERTEX_LOCATION,
+        }
+    )
+else:
+    raise RuntimeError(
+        "Gemini credentials not found. Set GOOGLE_API_KEY in your .env "
+        "or VERTEX_PROJECT and VERTEX_LOCATION for Vertex AI."
+    )
+
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 
-def _pct(x: Optional[float]) -> str:
-    if x is None:
-        return "n/a"
-    return f"{x * 100:.2f}%"
+# --------------------------------------------------
+# Core explainer helper
+# --------------------------------------------------
+
+def _format_metrics_text(metrics: Dict[str, float] | None) -> str:
+    """Turn metrics dict into a readable block of text."""
+    if not metrics:
+        return "No numerical portfolio metrics were provided."
+
+    lines = []
+    ar = metrics.get("annual_return")
+    av = metrics.get("annual_volatility")
+    sh = metrics.get("sharpe")
+    var_ = metrics.get("var_95")
+    cvar_ = metrics.get("cvar_95")
+    mdd = metrics.get("max_drawdown")
+
+    if ar is not None:
+        lines.append(f"- Annual return: {ar:.4f} ({ar*100:.2f}%)")
+    if av is not None:
+        lines.append(f"- Annual volatility: {av:.4f} ({av*100:.2f}%)")
+    if sh is not None:
+        lines.append(f"- Sharpe ratio: {sh:.4f}")
+    if var_ is not None:
+        lines.append(f"- 95% daily VaR: {var_:.4f} ({var_*100:.2f}%)")
+    if cvar_ is not None:
+        lines.append(f"- 95% daily CVaR: {cvar_:.4f} ({cvar_*100:.2f}%)")
+    if mdd is not None:
+        lines.append(f"- Max drawdown: {mdd:.4f} ({mdd*100:.2f}%)")
+
+    return "\n".join(lines)
 
 
-def explain_metrics(
-    metrics: Dict[str, float],
-    horizon: str = "1-year",
-    agent_name: str | None = None,
-    user_id: str | None = None,
-) -> str:
-    """
-    Core helper that turns raw risk metrics into a natural-language explanation
-    using Gemini. Extra args (agent_name, user_id) are accepted but ignored,
-    so ADK can pass them without breaking.
-    """
-    annual_return = metrics.get("annual_return")
-    annual_vol = metrics.get("annual_volatility")
-    sharpe = metrics.get("sharpe")
-    var_95 = metrics.get("var_95")
-    cvar_95 = metrics.get("cvar_95")
-    max_dd = metrics.get("max_drawdown")
+def _format_weights_text(weights: Dict[str, float] | None) -> str:
+    """Turn weights dict into text."""
+    if not weights:
+        return "No weights were provided."
 
-    sharpe_str = "n/a" if sharpe is None else f"{sharpe:.2f}"
-    var_str = "n/a" if var_95 is None else f"{var_95 * 100:.2f}%"
-    cvar_str = "n/a" if cvar_95 is None else f"{cvar_95 * 100:.2f}%"
-    maxdd_str = "n/a" if max_dd is None else f"{max_dd * 100:.2f}%"
+    parts = []
+    for ticker, w in sorted(weights.items(), key=lambda x: -x[1]):
+        parts.append(f"{ticker}: {w:.4f} ({w*100:.2f}%)")
 
-    bullet_summary = f"""
-    Portfolio risk snapshot over a {horizon} horizon:
-
-    - Annual return: {_pct(annual_return)}
-    - Annual volatility: {_pct(annual_vol)}
-    - Sharpe ratio: {sharpe_str}
-    - 95% VaR: {var_str}
-    - 95% CVaR: {cvar_str}
-    - Max drawdown: {maxdd_str}
-    """
-
-    prompt = f"""
-    You are a portfolio risk analyst.
-
-    The user has these portfolio risk metrics:
-
-    {bullet_summary}
-
-    Please:
-    1. Explain what each metric means in simple language.
-    2. Say whether this looks conservative, moderate, or aggressive.
-    3. Point out the main risks they should care about.
-    4. Keep it under 4 short paragraphs.
-    """
-
-    model = genai.GenerativeModel(MODEL_NAME)
-    resp = model.generate_content(prompt)
-    return resp.text or "I could not generate an explanation."
+    return "\n".join(parts)
 
 
 def explain_risk_from_dict(
-    metrics: Dict[str, float],
-    horizon: str = "1-year",
-    context: str | None = None,
+    metrics: Optional[Dict[str, float]] = None,
+    weights: Optional[Dict[str, float]] = None,
+    question: Optional[str] = None,
 ) -> str:
     """
-    Convenience wrapper used by the ADK tools. Ignores extra context for now.
+    Main entrypoint used by Streamlit.
+
+    - If metrics/weights are provided, the model acts as a portfolio / risk explainer.
+    - If they are missing or the user is just small-talking, it responds like a
+      friendly portfolio assistant.
     """
-    return explain_metrics(metrics, horizon=horizon)
+
+    metrics_text = _format_metrics_text(metrics)
+    weights_text = _format_weights_text(weights)
+
+    user_question = question or "Explain this portfolio in clear, simple language."
+
+    prompt = f"""
+You are a friendly quantitative portfolio assistant.
+
+You may receive:
+- Numeric portfolio risk metrics (annual return, volatility, Sharpe, VaR, CVaR, max drawdown).
+- A list of asset weights.
+- A user question, which can be about the portfolio or just normal conversation.
+
+If the user is just greeting you or asking a general question, respond normally
+as a helpful assistant and you do NOT need to force a risk explanation.
+
+If the user asks anything about the portfolio, risk, performance, diversification,
+or optimisation, then:
+- Use the metrics and weights below (if present),
+- Explain them in plain English,
+- Comment on risk/return trade-off,
+- Mention any red flags (very high volatility, very negative drawdown, etc.),
+- Keep it concise and not too technical.
+
+Portfolio metrics:
+{metrics_text}
+
+Portfolio weights:
+{weights_text}
+
+User question:
+\"\"\"{user_question}\"\"\"
+"""
+
+    resp = client.models.generate_content(
+        model=MODEL_NAME,
+        contents=[{"role": "user", "parts": [{"text": prompt}]}],
+    )
+
+    # google-genai 1.x puts the main text in resp.text
+    return (resp.text or "").strip()
