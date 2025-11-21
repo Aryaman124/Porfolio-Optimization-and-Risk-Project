@@ -1,92 +1,80 @@
 # src/agents/ai_explainer.py
-
 from __future__ import annotations
-from typing import Dict, Any
-import os
 
-from dotenv import load_dotenv
+import os
+from typing import Dict, Optional
+
 from google import genai
 
-# Load env vars like GOOGLE_API_KEY, GEMINI_MODEL, etc.
-load_dotenv()
-
-API_KEY = os.getenv("GOOGLE_API_KEY")
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
-
-# Create a reusable Gemini client
-_client = genai.Client(api_key=API_KEY) if API_KEY else None
+# Use GEMINI_MODEL from .env or fall back
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 
 
-def explain_metrics(portfolio_metrics: Dict[str, Any], style: str = "simple") -> str:
+def _pct(x: Optional[float]) -> str:
+    if x is None:
+        return "n/a"
+    return f"{x * 100:.2f}%"
+
+
+def explain_metrics(
+    metrics: Dict[str, float],
+    horizon: str = "1-year",
+    agent_name: str | None = None,
+    user_id: str | None = None,
+) -> str:
     """
-    Use Gemini to explain portfolio risk/return metrics in plain English.
-
-    This is the function your ADK agent (multi_tool_agent/agent.py)
-    imports as a TOOL.
+    Core helper that turns raw risk metrics into a natural-language explanation
+    using Gemini. Extra args (agent_name, user_id) are accepted but ignored,
+    so ADK can pass them without breaking.
     """
+    annual_return = metrics.get("annual_return")
+    annual_vol = metrics.get("annual_volatility")
+    sharpe = metrics.get("sharpe")
+    var_95 = metrics.get("var_95")
+    cvar_95 = metrics.get("cvar_95")
+    max_dd = metrics.get("max_drawdown")
 
-    # Safety: if no API key, just return a non-AI explanation
-    if _client is None:
-        return (
-            "AI explanation is unavailable because GOOGLE_API_KEY is not set.\n\n"
-            f"Raw metrics I received:\n{portfolio_metrics}"
-        )
+    sharpe_str = "n/a" if sharpe is None else f"{sharpe:.2f}"
+    var_str = "n/a" if var_95 is None else f"{var_95 * 100:.2f}%"
+    cvar_str = "n/a" if cvar_95 is None else f"{cvar_95 * 100:.2f}%"
+    maxdd_str = "n/a" if max_dd is None else f"{max_dd * 100:.2f}%"
 
-    # Build a nice prompt for Gemini
-    # Example portfolio_metrics dict might look like:
-    # {
-    #   "annual_return": 0.12,
-    #   "annual_volatility": 0.20,
-    #   "sharpe": 0.6,
-    #   "var_95": -0.035,
-    #   "cvar_95": -0.045,
-    #   "max_drawdown": -0.28
-    # }
-    metric_lines = []
-    for k, v in portfolio_metrics.items():
-        metric_lines.append(f"- {k}: {v}")
-    metrics_block = "\n".join(metric_lines)
+    bullet_summary = f"""
+    Portfolio risk snapshot over a {horizon} horizon:
 
-    if style == "simple":
-        tone = (
-            "Explain this as if you're talking to a smart beginner in finance. "
-            "Use short sentences and avoid heavy jargon."
-        )
-    elif style == "detailed":
-        tone = (
-            "Give a detailed, professional explanation suitable for an investment memo. "
-            "You can use technical terms like VaR, drawdown, Sharpe, but still stay clear."
-        )
-    else:
-        tone = "Explain clearly in natural language."
+    - Annual return: {_pct(annual_return)}
+    - Annual volatility: {_pct(annual_vol)}
+    - Sharpe ratio: {sharpe_str}
+    - 95% VaR: {var_str}
+    - 95% CVaR: {cvar_str}
+    - Max drawdown: {maxdd_str}
+    """
 
     prompt = f"""
-You are a portfolio risk and optimization assistant.
+    You are a portfolio risk analyst.
 
-The user has a portfolio with the following metrics:
+    The user has these portfolio risk metrics:
 
-{metrics_block}
+    {bullet_summary}
 
-1. Explain what each metric means (annual_return, annual_volatility, Sharpe, VaR, CVaR, max_drawdown, etc.).
-2. Interpret whether this portfolio seems conservative, moderate, or aggressive.
-3. Mention what kind of investor might be OK with this level of risk.
-4. Keep it focused on *this* portfolio, not generic textbook definitions.
+    Please:
+    1. Explain what each metric means in simple language.
+    2. Say whether this looks conservative, moderate, or aggressive.
+    3. Point out the main risks they should care about.
+    4. Keep it under 4 short paragraphs.
+    """
 
-Tone guideline: {tone}
-"""
+    model = genai.GenerativeModel(MODEL_NAME)
+    resp = model.generate_content(prompt)
+    return resp.text or "I could not generate an explanation."
 
-    response = _client.models.generate_content(
-        model=MODEL,
-        contents=prompt,
-    )
 
-    # Different versions of google-genai expose text slightly differently;
-    # this usually works in 1.5x:
-    try:
-        return response.text
-    except AttributeError:
-        # Fallback: join parts if needed
-        if hasattr(response, "candidates") and response.candidates:
-            parts = response.candidates[0].content.parts
-            return "".join(getattr(p, "text", "") for p in parts)
-        return "I could not generate an explanation. Raw response:\n" + repr(response)
+def explain_risk_from_dict(
+    metrics: Dict[str, float],
+    horizon: str = "1-year",
+    context: str | None = None,
+) -> str:
+    """
+    Convenience wrapper used by the ADK tools. Ignores extra context for now.
+    """
+    return explain_metrics(metrics, horizon=horizon)
