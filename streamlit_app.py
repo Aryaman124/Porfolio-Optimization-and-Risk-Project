@@ -2,12 +2,14 @@
 from pathlib import Path
 import json
 from typing import Dict
+import re  # for extracting tickers from text
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 from dotenv import load_dotenv
+import yfinance as yf  
 
 from src.agents.data_agent import (
     DataConfig,
@@ -69,6 +71,70 @@ def parse_kv(text: str) -> dict[str, float]:
 def fmt_ticker(t: str) -> str:
     name = TICKER_NAMES.get(t, "")
     return f"{t} — {name}" if name else t
+
+
+# ---------- helpers for hybrid chat / live data ----------
+
+# Map common company names → tickers so
+# "price of amazon" → AMZN, etc.
+NAME_TO_TICKER = {
+    "AMAZON": "AMZN",
+    "APPLE": "AAPL",
+    "MICROSOFT": "MSFT",
+    "NVIDIA": "NVDA",
+    "GOOGLE": "GOOGL",
+    "ALPHABET": "GOOGL",
+    "META": "META",
+    "FACEBOOK": "META",
+    "TESLA": "TSLA",
+    "JPMORGAN": "JPM",
+    "JPMORGAN CHASE": "JPM",
+}
+
+
+def extract_tickers_from_text(text: str, universe: list[str]) -> list[str]:
+    """
+    Extract candidate tickers from user text.
+
+    Priority:
+      1. Match common company names (Amazon → AMZN).
+      2. Match explicit uppercase ticker-like tokens (NVDA, AAPL).
+
+    Safeguards:
+      - Ignore 1-letter tokens entirely (so "don't" will NOT become T).
+    """
+    text_up = text.upper()
+    found: list[str] = []
+
+    # 1) Company names → tickers
+    for name, ticker in NAME_TO_TICKER.items():
+        if name in text_up and ticker in universe and ticker not in found:
+            found.append(ticker)
+
+    # 2) Explicit ticker-like tokens (2–6 chars, all caps)
+    tokens = re.findall(r"[A-Z][A-Z.\-]{1,5}", text_up)
+    for tok in tokens:
+        if 2 <= len(tok) <= 6 and tok in universe and tok not in found:
+            found.append(tok)
+
+    return found
+
+
+def get_live_prices(tickers: list[str]) -> Dict[str, float]:
+    """
+    Fetch near-real-time prices for tickers using yfinance.
+    Returns a dict: { 'AAPL': 231.12, ... }
+    """
+    prices: Dict[str, float] = {}
+    for t in tickers:
+        try:
+            hist = yf.Ticker(t).history(period="1d", interval="1m")
+            if not hist.empty:
+                prices[t] = float(hist["Close"].iloc[-1])
+        except Exception:
+            # If any ticker fails, just skip it
+            continue
+    return prices
 
 
 # =============================================================
@@ -406,13 +472,13 @@ with tab_risk:
             st.error(f"Risk analysis error: {e}")
 
 
-# ============================= CHAT TAB (GPT-style UI) =============================
+# ============================= CHAT TAB (Hybrid GPT-style UI) =============================
 with tab_chat:
     st.header("💬 AI Portfolio Chatbot")
 
     st.caption(
         "Ask questions about your portfolio, optimization results, or risk profile. "
-        "If no portfolio is loaded yet, I can still chat normally."
+        "You can also ask for live prices like: 'What's NVDA trading at today?'"
     )
 
     # Chat history as list of dicts: {"role": "user"|"assistant", "content": str}
@@ -425,7 +491,7 @@ with tab_chat:
             st.markdown(msg["content"])
 
     # Chat input at the bottom (like GPT)
-    user_msg = st.chat_input("Ask about your portfolio...")
+    user_msg = st.chat_input("Ask about your portfolio or live prices...")
     if user_msg:
         # 1) Add user message
         st.session_state["chat_history"].append(
@@ -449,13 +515,55 @@ with tab_chat:
             }
             weights_ctx = o.get("weights", {})
 
-        # 3) Generate answer (works even if metrics_ctx is None)
-        with st.spinner("Thinking..."):
-            bot_reply = explain_risk_from_dict(
-                metrics=metrics_ctx,
-                weights=weights_ctx,
-                question=user_msg,
-            )
+        # -------- HYBRID ROUTING LOGIC --------
+        text_lower = user_msg.lower()
+        wants_live = any(
+            kw in text_lower
+            for kw in ["price", "quote", "trading at", "today", "right now", "live"]
+        )
+
+        tickers_in_msg = extract_tickers_from_text(user_msg, universe)
+
+        if wants_live and tickers_in_msg:
+            # User is probably asking for live quotes -> use yfinance
+            with st.spinner("Fetching live market data..."):
+                live = get_live_prices(tickers_in_msg)
+
+            if live:
+                lines = []
+                for t, p in live.items():
+                    lines.append(
+                        f"- **{t}** is trading around **${p:,.2f}** "
+                        f"(near real-time quote via Yahoo Finance)."
+                    )
+
+                extra_note = ""
+                if metrics_ctx:
+                    extra_note = (
+                        "\n\nI also have your portfolio context loaded, so I can explain how "
+                        "these names fit into your allocation or risk profile if you want."
+                    )
+
+                bot_reply = (
+                    "Here are the latest prices I could retrieve:\n\n"
+                    + "\n".join(lines)
+                    + extra_note
+                )
+            else:
+                bot_reply = (
+                    "I tried to fetch live prices for the tickers I found in your message, "
+                    "but couldn't retrieve any quotes. "
+                    "Please double-check the symbols or try again."
+                )
+
+        else:
+            # Normal / portfolio / risk / small-talk -> send to Gemini explainer
+            with st.spinner("Thinking..."):
+                bot_reply = explain_risk_from_dict(
+                    metrics=metrics_ctx,
+                    weights=weights_ctx,
+                    question=user_msg,
+                )
 
         # 4) Add bot message
         st.session_state["chat_history"].append(

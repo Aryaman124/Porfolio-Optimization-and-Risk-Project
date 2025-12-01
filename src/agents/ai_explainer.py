@@ -39,7 +39,7 @@ MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 
 # --------------------------------------------------
-# Core explainer helper
+# Formatting helpers
 # --------------------------------------------------
 
 def _format_metrics_text(metrics: Dict[str, float] | None) -> str:
@@ -83,6 +83,10 @@ def _format_weights_text(weights: Dict[str, float] | None) -> str:
     return "\n".join(parts)
 
 
+# --------------------------------------------------
+# Main entrypoint used by Streamlit
+# --------------------------------------------------
+
 def explain_risk_from_dict(
     metrics: Optional[Dict[str, float]] = None,
     weights: Optional[Dict[str, float]] = None,
@@ -98,27 +102,53 @@ def explain_risk_from_dict(
 
     metrics_text = _format_metrics_text(metrics)
     weights_text = _format_weights_text(weights)
-
     user_question = question or "Explain this portfolio in clear, simple language."
 
     prompt = f"""
-You are a friendly quantitative portfolio assistant.
+You are a friendly quantitative portfolio assistant INSIDE a Streamlit app
+called PortfolioQuant.ai.
+
+Very important:
+- This app CAN fetch near real-time stock prices using a separate pricing tool.
+- The outer Python code decides when to call that tool (for queries like
+  "price of NVDA" or "what is AAPL trading at today?").
+- You should NEVER say you “cannot fetch prices” or “cannot access live data”.
+- If the user asks whether you can fetch prices, clearly answer YES and explain
+  that in this app you can show prices when they ask for specific tickers.
 
 You may receive:
 - Numeric portfolio risk metrics (annual return, volatility, Sharpe, VaR, CVaR, max drawdown).
 - A list of asset weights.
-- A user question, which can be about the portfolio or just normal conversation.
+- A user question, which can be about the portfolio OR just normal conversation.
 
-If the user is just greeting you or asking a general question, respond normally
-as a helpful assistant and you do NOT need to force a risk explanation.
+Behavior rules:
 
-If the user asks anything about the portfolio, risk, performance, diversification,
-or optimisation, then:
-- Use the metrics and weights below (if present),
-- Explain them in plain English,
-- Comment on risk/return trade-off,
-- Mention any red flags (very high volatility, very negative drawdown, etc.),
-- Keep it concise and not too technical.
+1) If the user is greeting you or asking general / small-talk questions:
+   - Respond naturally as a helpful assistant.
+   - You do NOT need to mention risk metrics unless it makes sense.
+
+2) If the user asks about:
+   - portfolio performance,
+   - risk,
+   - diversification,
+   - optimization,
+   - or specific metrics (VaR, CVaR, Sharpe, drawdowns),
+   THEN:
+   - Use the metrics and weights below (if present),
+   - Explain what they mean in plain English,
+   - Comment on the risk/return trade-off,
+   - Point out any red flags (very high volatility, big drawdowns, low Sharpe, etc.),
+   - Keep it concise and not overly technical.
+
+3) If the user asks about CAPABILITY, like:
+   - "Can you fetch stock prices?"
+   - "Could you get me the price of a stock if I asked?"
+   Answer clearly:
+   - YES, explain that inside this app you can provide near real-time prices
+     when the user asks for a specific ticker (e.g. "What's NVDA trading at?").
+   - DO NOT say you lack access to prices or live market data.
+
+Here is the current portfolio context (may be empty):
 
 Portfolio metrics:
 {metrics_text}
@@ -135,5 +165,4 @@ User question:
         contents=[{"role": "user", "parts": [{"text": prompt}]}],
     )
 
-    # google-genai 1.x puts the main text in resp.text
     return (resp.text or "").strip()
